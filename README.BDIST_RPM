@@ -1,3 +1,8 @@
+This fork updated the multiprocess plugin so that it reports an error on a test
+that crashes a python process.
+
+-------------------------------------------
+
 On some platforms, brp-compress zips man pages without distutils knowing about
 it. This results in an error when building an rpm for nose. The rpm build will
 report either that an unpackaged file was found, or that an expected package
