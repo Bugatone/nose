@@ -322,13 +322,14 @@ class MultiProcessTestRunner(TextTestRunner):
                 log.debug("Queued test %s (%s) to %s",
                           len(tasks), test_addr, testQueue)
 
-    def startProcess(self, iworker, testQueue, resultQueue, shouldStop, result):
+    def startProcess(self, iworker, testQueue, resultQueue, procesingQueue, shouldStop, result):
         currentaddr = Value('c',bytes_(''))
         currentstart = Value('d',time.time())
         keyboardCaught = Event()
         p = Process(target=runner,
                    args=(iworker, testQueue,
                          resultQueue,
+                         procesingQueue,
                          currentaddr,
                          currentstart,
                          keyboardCaught,
@@ -364,6 +365,7 @@ class MultiProcessTestRunner(TextTestRunner):
 
         testQueue = Queue()
         resultQueue = Queue()
+        procesingQueues = []
         tasks = []
         completed = []
         workers = []
@@ -377,7 +379,9 @@ class MultiProcessTestRunner(TextTestRunner):
 
         log.debug("Starting %s workers", self.config.multiprocess_workers)
         for i in range(self.config.multiprocess_workers):
-            p = self.startProcess(i, testQueue, resultQueue, shouldStop, result)
+            procesingQueue = Queue()
+            procesingQueues.append(procesingQueue)
+            p = self.startProcess(i, testQueue, resultQueue, procesingQueue, shouldStop, result)
             workers.append(p)
             log.debug("Started worker process %s", i+1)
 
@@ -466,6 +470,16 @@ class MultiProcessTestRunner(TextTestRunner):
                                         break
                                     os.kill(w.pid, signal.SIGILL)
                                     time.sleep(0.1)
+                        elif w.exitcode != signal.SIGILL:
+                            lastTask = None
+                            procesingQueue = procesingQueues[iworker]
+                            while not procesingQueue.empty():
+                                lastTask = procesingQueue.get()
+                            if lastTask is not None:
+                                try:
+                                    raise Exception("The following task crashed a worker process: %s" % lastTask)
+                                except:
+                                    result.addError(test, sys.exc_info())
                     if not any_alive and testQueue.empty():
                         log.debug("All workers dead")
                         break
@@ -644,18 +658,18 @@ class MultiProcessTestRunner(TextTestRunner):
         log.debug("Ran %s tests (total: %s)", testsRun, result.testsRun)
 
 
-def runner(ix, testQueue, resultQueue, currentaddr, currentstart,
+def runner(ix, testQueue, resultQueue, procesingQueue, currentaddr, currentstart,
            keyboardCaught, shouldStop, loaderClass, resultClass, config):
     try:
         try:
-            return __runner(ix, testQueue, resultQueue, currentaddr, currentstart,
+            return __runner(ix, testQueue, resultQueue, procesingQueue, currentaddr, currentstart,
                     keyboardCaught, shouldStop, loaderClass, resultClass, config)
         except KeyboardInterrupt:
             log.debug('Worker %s keyboard interrupt, stopping',ix)
     except Empty:
         log.debug("Worker %s timed out waiting for tasks", ix)
 
-def __runner(ix, testQueue, resultQueue, currentaddr, currentstart,
+def __runner(ix, testQueue, resultQueue, procesingQueue, currentaddr, currentstart,
            keyboardCaught, shouldStop, loaderClass, resultClass, config):
 
     config = pickle.loads(config)
@@ -668,6 +682,8 @@ def __runner(ix, testQueue, resultQueue, currentaddr, currentstart,
     config.plugins.configure(config.options,config)
     config.plugins.begin()
     log.debug("Worker %s executing, pid=%d", ix,os.getpid())
+    loader = loaderClass(config=config)
+    loader.suiteClass.suiteClass = NoSharedFixtureContextSuite
 
     def get():
         return testQueue.get(timeout=config.multiprocess_timeout)
@@ -700,8 +716,6 @@ def __runner(ix, testQueue, resultQueue, currentaddr, currentstart,
             log.exception('Worker %d STOPPED',ix)
             break
         result = makeResult()
-        loader = loaderClass(config=config)
-        loader.suiteClass.suiteClass = NoSharedFixtureContextSuite
         test = loader.loadTestsFromNames([test_addr])
         test.testQueue = testQueue
         test.tasks = []
@@ -710,6 +724,7 @@ def __runner(ix, testQueue, resultQueue, currentaddr, currentstart,
         try:
             if arg is not None:
                 test_addr = test_addr + str(arg)
+            procesingQueue.put(test_addr)
             currentaddr.value = bytes_(test_addr)
             currentstart.value = time.time()
             test(result)
